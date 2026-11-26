@@ -10,13 +10,19 @@ limits, and writes it out as entry.png in the harness output folder.
 Python 3 standard library only. No network access. Deterministic: the output
 bytes are the source bytes, so two runs write identical files.
 
+The gate also wants a whole image, so the program walks the PNG's chunks and
+checks each chunk's CRC and that the file ends with an IEND chunk before it
+hands anything over.
+
 Local dry run:
     mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 """
 
 import hashlib
 import os
+import struct
 import sys
+import zlib
 from pathlib import Path
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -40,6 +46,30 @@ def png_dimensions(data):
     return width, height
 
 
+def check_png_whole(data):
+    """Walk every PNG chunk, verify its CRC, and require a closing IEND."""
+    offset = 8
+    seen_iend = False
+    while offset + 8 <= len(data):
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        chunk_type = data[offset + 4:offset + 8]
+        end = offset + 8 + length + 4
+        if end > len(data):
+            fail(f"PNG chunk {chunk_type!r} runs past the end of the file")
+        stored_crc = int.from_bytes(data[end - 4:end], "big")
+        actual_crc = zlib.crc32(chunk_type + data[offset + 8:end - 4]) & 0xFFFFFFFF
+        if stored_crc != actual_crc:
+            fail(f"PNG chunk {chunk_type!r} fails its checksum")
+        if chunk_type == b"IEND":
+            seen_iend = True
+            if end != len(data):
+                fail("bytes follow the PNG's IEND chunk")
+            break
+        offset = end
+    if not seen_iend:
+        fail("PNG has no closing IEND chunk")
+
+
 def main():
     here = Path(__file__).resolve().parent
     source = here / "news.png"
@@ -52,6 +82,7 @@ def main():
     width, height = png_dimensions(data)
     if width > MAX_SIDE or height > MAX_SIDE:
         fail(f"bundled artwork is {width}x{height}, over the 1024x1024 limit")
+    check_png_whole(data)
 
     out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
     out_dir.mkdir(parents=True, exist_ok=True)
